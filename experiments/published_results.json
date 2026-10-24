@@ -1,0 +1,33 @@
+{
+  "_source": "MVFA: Huang et al., CVPR 2024, arXiv:2403.12570, Appendix Table 7. MadCLIP: Shiri et al., MICCAI 2025, arXiv:2506.23810, Table 1 (k=16) and Table 2 (k=2,4,8). DRA/BGAD/APRIL-GAN/MediCLIP as reported in MadCLIP Tables 1-2. Columns: image AUC for every dataset, pixel AUC for Brain/Liver/RESC (key *_px). Single support set; ViT-L/14 at 240 px for MVFA and MadCLIP. Copied 2026-10-22.",
+  "MVFA": {
+    "2":  {"Histopathology": 82.61, "Chest": 81.32, "Retina_OCT2017": 97.98, "Brain": 92.72, "Brain_px": 96.55, "Liver": 81.08, "Liver_px": 96.57, "Retina_RESC": 91.36, "Retina_RESC_px": 98.11},
+    "4":  {"Histopathology": 82.71, "Chest": 81.95, "Retina_OCT2017": 99.38, "Brain": 92.44, "Brain_px": 97.30, "Liver": 81.18, "Liver_px": 99.73, "Retina_RESC": 96.18, "Retina_RESC_px": 98.97},
+    "8":  {"Histopathology": 85.10, "Chest": 83.89, "Retina_OCT2017": 99.64, "Brain": 92.61, "Brain_px": 97.21, "Liver": 85.90, "Liver_px": 99.79, "Retina_RESC": 96.57, "Retina_RESC_px": 99.00},
+    "16": {"Histopathology": 82.62, "Chest": 85.72, "Retina_OCT2017": 99.66, "Brain": 94.40, "Brain_px": 97.70, "Liver": 83.85, "Liver_px": 99.73, "Retina_RESC": 97.25, "Retina_RESC_px": 99.07}
+  },
+  "MadCLIP": {
+    "2":  {"Histopathology": 83.62, "Chest": 84.56, "Retina_OCT2017": 99.06, "Brain": 93.93, "Brain_px": 97.92, "Liver": 84.48, "Liver_px": 99.39, "Retina_RESC": 95.09, "Retina_RESC_px": 97.18},
+    "4":  {"Histopathology": 80.05, "Chest": 88.10, "Retina_OCT2017": 99.37, "Brain": 95.25, "Brain_px": 97.90, "Liver": 82.97, "Liver_px": 99.29, "Retina_RESC": 96.62, "Retina_RESC_px": 98.90},
+    "8":  {"Histopathology": 87.45, "Chest": 83.90, "Retina_OCT2017": 99.14, "Brain": 95.17, "Brain_px": 98.02, "Liver": 89.31, "Liver_px": 99.81, "Retina_RESC": 97.16, "Retina_RESC_px": 98.85},
+    "16": {"Histopathology": 90.14, "Chest": 88.15, "Retina_OCT2017": 99.71, "Brain": 95.90, "Brain_px": 97.97, "Liver": 91.46, "Liver_px": 99.74, "Retina_RESC": 99.11, "Retina_RESC_px": 99.45}
+  },
+  "APRIL-GAN": {
+    "2":  {"Histopathology": 69.57, "Chest": 69.84, "Retina_OCT2017": 99.21, "Brain": 78.45, "Brain_px": 94.02, "Liver": 57.80, "Liver_px": 95.87, "Retina_RESC": 89.44, "Retina_RESC_px": 96.39},
+    "4":  {"Histopathology": 76.11, "Chest": 77.43, "Retina_OCT2017": 99.41, "Brain": 89.18, "Brain_px": 94.67, "Liver": 53.05, "Liver_px": 96.24, "Retina_RESC": 94.70, "Retina_RESC_px": 97.98},
+    "8":  {"Histopathology": 81.70, "Chest": 73.69, "Retina_OCT2017": 99.75, "Brain": 88.41, "Brain_px": 95.50, "Liver": 62.38, "Liver_px": 97.56, "Retina_RESC": 91.36, "Retina_RESC_px": 97.36},
+    "16": {"Histopathology": 81.16, "Chest": 78.62, "Retina_OCT2017": 99.93, "Brain": 94.03, "Brain_px": 96.17, "Liver": 82.94, "Liver_px": 99.64, "Retina_RESC": 95.96, "Retina_RESC_px": 98.47}
+  },
+  "MediCLIP": {
+    "2":  {"Histopathology": 64.49, "Chest": 61.69, "Retina_OCT2017": 93.40, "Brain": 85.13, "Brain_px": 97.39, "Liver": 68.48, "Liver_px": 97.09, "Retina_RESC": 83.96, "Retina_RESC_px": 96.01},
+    "4":  {"Histopathology": 70.85, "Chest": 56.83, "Retina_OCT2017": 89.07, "Brain": 83.82, "Brain_px": 96.86, "Liver": 81.53, "Liver_px": 98.61, "Retina_RESC": 87.52, "Retina_RESC_px": 96.65},
+    "8":  {"Histopathology": 69.80, "Chest": 72.08, "Retina_OCT2017": 95.69, "Brain": 92.29, "Brain_px": 98.02, "Liver": 86.32, "Liver_px": 98.32, "Retina_RESC": 88.82, "Retina_RESC_px": 95.98},
+    "16": {"Histopathology": 70.22, "Chest": 69.74, "Retina_OCT2017": 96.37, "Brain": 91.56, "Brain_px": 98.08, "Liver": 79.31, "Liver_px": 98.95, "Retina_RESC": 86.51, "Retina_RESC_px": 94.07}
+  },
+  "DRA": {
+    "2":  {"Histopathology": 72.91, "Chest": 72.22, "Retina_OCT2017": 98.08, "Brain": 71.78, "Brain_px": 72.09, "Liver": 57.17, "Liver_px": 63.13, "Retina_RESC": 85.69, "Retina_RESC_px": 65.59},
+    "4":  {"Histopathology": 68.73, "Chest": 75.81, "Retina_OCT2017": 99.06, "Brain": 80.62, "Brain_px": 74.77, "Liver": 59.64, "Liver_px": 71.79, "Retina_RESC": 90.90, "Retina_RESC_px": 77.28},
+    "8":  {"Histopathology": 74.33, "Chest": 82.70, "Retina_OCT2017": 99.13, "Brain": 85.94, "Brain_px": 75.32, "Liver": 72.53, "Liver_px": 81.78, "Retina_RESC": 93.06, "Retina_RESC_px": 83.07},
+    "16": {"Histopathology": 79.16, "Chest": 85.01, "Retina_OCT2017": 99.87, "Brain": 82.99, "Brain_px": 80.45, "Liver": 80.89, "Liver_px": 93.00, "Retina_RESC": 94.88, "Retina_RESC_px": 84.01}
+  }
+}
