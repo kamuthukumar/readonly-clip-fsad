@@ -470,6 +470,100 @@ def frozen_bank(tok_normal):
     return [F.normalize(t[:, l, 1:].reshape(-1, 768), dim=-1).half() for l in range(t.shape[1])]
 
 
+def agg3(p):
+    """[B,196,D] patch tokens -> mean over each patch's 3x3 neighbourhood on the 14x14 grid."""
+    B, N, D = p.shape
+    g = int(math.sqrt(N))
+    x = p.transpose(1, 2).reshape(B, D, g, g)
+    return F.avg_pool2d(x, 3, stride=1, padding=1, count_include_pad=False).reshape(B, D, N).transpose(1, 2)
+
+
+@torch.no_grad()
+def extra_banks(model, tok_normal, seg, tok_abn=None, abn_patch=None, lite=False):
+    """Memories for the extra memory-only scores: neighbourhood-averaged adapted tokens per head,
+    frozen tokens (plain and averaged) and, from the abnormal support images, lesion patches
+    (abn_patch [n,196] marks them) and image embeddings for the two-sided scores."""
+    t = tok_normal.to(DEV).float()
+    mk = lambda xs: [F.normalize(x.reshape(-1, 768), dim=-1).half() for x in xs]
+    heads = ["det", "seg"] if seg else ["det"]
+    b = {}
+    if not lite:  # lite: only the two-sided lesion memory (the selected method)
+        b.update({f"agg_{h}": mk([agg3(x[:, 1:]) for x in model.adapt(t, h)]) for h in heads})
+        b["frozen"] = mk([t[:, l, 1:] for l in range(t.shape[1])])
+        b["frozen_agg"] = mk([agg3(t[:, l, 1:]) for l in range(t.shape[1])])
+    if tok_abn is not None and lite:
+        ta = tok_abn.to(DEV).float()
+        if seg and abn_patch is not None:
+            sel = abn_patch.to(DEV).bool()
+            if sel.sum() == 0:
+                sel = torch.ones_like(sel)
+            b["lesion_seg"] = [F.normalize(x[:, 1:][sel], dim=-1).half() for x in model.adapt(ta, "seg")]
+    elif tok_abn is not None:
+        ta = tok_abn.to(DEV).float()
+        emb = lambda xs: torch.cat([F.normalize(x[:, 1:].mean(1), dim=-1) for x in xs], -1)  # [n, L*768]
+        b["emb_n"], b["emb_a"] = emb(model.adapt(t, "det")), emb(model.adapt(ta, "det"))
+        # pseudo-lesion memory for every dataset (no masks needed): per abnormal support image, the
+        # 10% of its detection-adapted patches farthest from the normal memory
+        normal_det = mk([x[:, 1:] for x in model.adapt(t, "det")])
+        pl = []
+        for l, x in enumerate(model.adapt(ta, "det")):
+            p = x[:, 1:]
+            d = knn_dist(p, normal_det[l])                                   # [n,196]
+            top = d.topk(max(1, p.shape[1] // 10), dim=1).indices           # [n,20]
+            pl.append(F.normalize(torch.gather(p, 1, top.unsqueeze(-1).expand(-1, -1, p.shape[-1])).reshape(-1, 768),
+                                  dim=-1).half())
+        b["pseudo_det"] = pl
+        if seg and abn_patch is not None:
+            sel = abn_patch.to(DEV).bool()
+            if sel.sum() == 0:
+                sel = torch.ones_like(sel)
+            b["lesion_seg"] = [F.normalize(x[:, 1:][sel], dim=-1).half() for x in model.adapt(ta, "seg")]
+    return b
+
+
+@torch.no_grad()
+def extra_scores(model, t, b, mains, seg, chunk=8, det_pool="mean"):
+    """Memory-only scores that need no test statistics: 'agg' (3x3-averaged adapted tokens),
+    'dual' (adapted + frozen distance) and 'aggdual' (both averaged)."""
+    t = t.to(DEV).float()
+    out = {}
+    pool = (lambda d: d.max(1).values) if det_pool == "max" else (lambda d: d.mean(1))
+    for h in (["det", "seg"] if seg else ["det"]):
+        acc = {}
+        main = mains[h]
+        for l, x in enumerate(model.adapt(t, h) if f"agg_{h}" in b else []):
+            bank = b[f"agg_{h}"]
+            p = x[:, 1:]
+            d_agg = knn_dist(agg3(p), bank[l], chunk)
+            d_fro = knn_dist(t[:, l, 1:], b["frozen"][l], chunk)
+            d_froagg = knn_dist(agg3(t[:, l, 1:]), b["frozen_agg"][l], chunk)
+            d_main = knn_dist(p, main[l], chunk)
+            for name, d in (("agg", d_agg), ("dual", d_main + d_fro), ("aggdual", d_agg + d_froagg)):
+                acc[name] = acc.get(name, 0.0) + (pool(d) if h == "det" else upsample(d))
+        for name, v in acc.items():
+            out[f"{h}_{name}"] = v
+        if h == "seg" and "lesion_seg" in b:  # two-sided: far from normal patches, close to lesion patches
+            two = 0.0
+            for l, x in enumerate(model.adapt(t, "seg")):
+                p = x[:, 1:]
+                two = two + upsample(knn_dist(p, main[l], chunk) - knn_dist(p, b["lesion_seg"][l], chunk))
+            out["seg_two"] = two
+    if "pseudo_det" in b:  # patch-level two-sided on the detection head with pseudo-lesion memory
+        two = 0.0
+        for l, x in enumerate(model.adapt(t, "det")):
+            p = x[:, 1:]
+            d = knn_dist(p, mains["det"][l], chunk) - knn_dist(p, b["pseudo_det"][l], chunk)
+            two = two + pool(d)
+        out["det_pseudo"] = two
+    if "emb_n" in b:  # image-level two-sided nearest neighbour on mean adapted detection tokens
+        e = torch.cat([F.normalize(x[:, 1:].mean(1), dim=-1) for x in model.adapt(t, "det")], -1)
+        L = t.shape[1]
+        dn = L - (e @ b["emb_n"].T).max(1).values
+        da = L - (e @ b["emb_a"].T).max(1).values
+        out["det_two"] = dn - da
+    return out
+
+
 def knn_dist(p, bank, chunk=8):
     """p [B,196,768] -> [B,196] cosine distance to the nearest memory patch."""
     q = F.normalize(p, dim=-1).half()
@@ -582,6 +676,10 @@ def config_name(a):
         parts.append(f"dp-{a.det_pool}")
     if a.dual_memory:
         parts.append("dualmem")
+    if a.extra_scores:
+        parts.append("xs")
+    if a.ensemble > 1:
+        parts.append(f"ens{a.ensemble}")
     if a.eval_every:
         parts.append(f"curve{a.eval_every}")
     return "_".join(parts)
@@ -603,7 +701,11 @@ def run_one(bb, args, dataset, k, set_id, test_tok, meta, test_masks, text, bloc
                              for i in range(0, len(a_img), 32)])
     t_feat = time.time() - t0
 
-    model = FSAD(len(args.blocks), bb.norm, bb.proj, text, mode=args.adapter, gamma0=args.gamma0).to(DEV)
+    # an ensemble trains several adapter sets (different seeds) on the same cached features and
+    # averages their text and memory scores; cheap because the encoder is never re-run
+    models = [FSAD(len(args.blocks), bb.norm, bb.proj, text, mode=args.adapter, gamma0=args.gamma0).to(DEV)
+              for _ in range(args.ensemble)]
+    model = models[0]
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     y_all = np.array(meta["labels"])
 
@@ -625,13 +727,25 @@ def run_one(bb, args, dataset, k, set_id, test_tok, meta, test_masks, text, bloc
             return flat.max(1).values.float()
         return flat.float().topk(max(1, flat.shape[1] // 100), dim=1).values.mean(1)
 
+    vd_counts = (0, 0)
+
     def evaluate():
         """Score every test image with the current adapters; every scoring variant at once."""
-        model.eval()
+        nonlocal vd_counts
+        for mdl in models:
+            mdl.eval()
         normal_tok = sup_tok[labels == 0]
-        mem_seg = memory_bank(model, normal_tok, "seg") if seg else None
-        mem_det = memory_bank(model, normal_tok, "det")
+        banks = [(memory_bank(mdl, normal_tok, "seg") if seg else None, memory_bank(mdl, normal_tok, "det"))
+                 for mdl in models]
         mem_frozen = frozen_bank(normal_tok) if (args.dual_memory and args.adapter != "none") else None
+        abn_patch = patch_labels(a_mask[labels == 1]) if seg else None
+        xbanks = [extra_banks(mdl, normal_tok, seg, sup_tok[labels == 1], abn_patch, lite=args.xs_lite)
+                  for mdl in models] if args.extra_scores else None
+        xnames_det = [] if args.xs_lite else ["agg", "dual", "aggdual", "two", "pseudo"]
+        xnames_seg = ["two"] if args.xs_lite else ["agg", "dual", "aggdual", "two"]
+        xdet = {nm: torch.zeros(meta["n"]) for nm in xnames_det} if args.extra_scores else {}
+        xseg = {nm: torch.zeros((meta["n"], EVAL, EVAL), dtype=torch.float16) for nm in xnames_seg} \
+            if (args.extra_scores and seg) else {}
         stats = support_stats(model, sup_tok, src, labels, seg, det_pool=args.det_pool,
                               dual_memory=mem_frozen is not None)
         n = meta["n"]
@@ -645,7 +759,18 @@ def run_one(bb, args, dataset, k, set_id, test_tok, meta, test_masks, text, bloc
         for s in range(0, n, args.eval_batch):
             t = torch.from_numpy(np.ascontiguousarray(test_tok[s:s + args.eval_batch][:, block_idx]))
             check(t, "cached test features")
-            o = score_batch(model, t, mem_seg, mem_det, seg, det_pool=args.det_pool, mem_frozen=mem_frozen)
+            outs = [score_batch(mdl, t, ms, md, seg, det_pool=args.det_pool, mem_frozen=mem_frozen)
+                    for mdl, (ms, md) in zip(models, banks)]
+            o = {key: sum(x[key] for x in outs) / len(outs) for key in outs[0]}
+            del outs
+            if xbanks is not None:
+                xo = [extra_scores(mdl, t, xb, {"det": md, "seg": ms}, seg, det_pool=args.det_pool)
+                      for mdl, xb, (ms, md) in zip(models, xbanks, banks)]
+                for nm in xdet:
+                    xdet[nm][s:s + len(t)] = (sum(x[f"det_{nm}"] for x in xo) / len(xo)).cpu()
+                for nm in xseg:
+                    xseg[nm][s:s + len(t)] = (sum(x[f"seg_{nm}"] for x in xo) / len(xo)).half().cpu()
+                del xo
             det_text[s:s + len(t)] = check(o["det_text"], "text scores").cpu()
             det_mem[s:s + len(t)] = check(o["det_mem"], "memory scores").cpu()
             if seg:
@@ -659,6 +784,8 @@ def run_one(bb, args, dataset, k, set_id, test_tok, meta, test_masks, text, bloc
             y = y[keep]
             kt = torch.from_numpy(keep)
             det_text, det_mem = det_text[kt], det_mem[kt]
+            xdet = {nm: v[kt] for nm, v in xdet.items()}
+            xseg = {nm: v[kt] for nm, v in xseg.items()}
             if seg:
                 seg_t, seg_m = seg_t[kt], seg_m[kt]
                 masks_eval = test_masks[keep]
@@ -676,13 +803,39 @@ def run_one(bb, args, dataset, k, set_id, test_tok, meta, test_masks, text, bloc
                 variants[f"pixel_{name}"] = hist_auc(m.flatten(), gt)
                 variants[f"image_max_{name}"] = float(roc_auc_score(y, img_from(m).numpy()))
                 del m
+            if not args.dev:
+                # volume-disjoint evaluation: drop test images from any volume of the support set,
+                # because BMAD's valid and test splits share patients. File names are <volume>_<slice>
+                vol = lambda p: Path(p).stem.rsplit("_", 1)[0]
+                sup_vols = {vol(r[0]) for r in rows}
+                keep = np.array([vol(p) not in sup_vols for p in meta["paths"]])
+                kt, yd = torch.from_numpy(keep), y[keep]
+                vd_counts = (int((yd == 1).sum()), int((yd == 0).sum()))
+                if min(vd_counts) > 0:
+                    gtd = torch.from_numpy(masks_eval[keep]).bool().flatten()
+                    maps = {"memory": seg_m[kt], "text": seg_t[kt],
+                            "testminmax": fuse_with(seg_t[kt], seg_m[kt], "seg", "both", "testminmax", 0.5, stats)}
+                    if "two" in xseg:
+                        maps["memory_two"] = xseg["two"][kt]
+                    for name, m in maps.items():
+                        variants[f"vd_pixel_{name}"] = hist_auc(m.float().flatten(), gtd)
+                        variants[f"vd_image_{name}"] = float(roc_auc_score(yd, img_from(m).numpy()))
+                    del maps, gtd
             del seg_t, seg_m
         for name, (h, f, w) in schemes.items():
             variants[f"image_det_{name}"] = float(roc_auc_score(y, fuse_with(det_text, det_mem, "det", h, f, w, stats).numpy()))
-        del mem_seg, mem_det, mem_frozen
+        # extra memory-only scores (no test statistics); image score = max of the map, as for "memory"
+        for nm, v in xdet.items():
+            variants[f"image_det_memory_{nm}"] = float(roc_auc_score(y, v.float().numpy()))
+        if seg:
+            for nm, m in xseg.items():
+                variants[f"pixel_memory_{nm}"] = hist_auc(m.flatten(), gt)
+                variants[f"image_max_memory_{nm}"] = float(roc_auc_score(y, img_from(m).numpy()))
+        del banks, mem_frozen, xbanks, xdet, xseg
         if DEV.type == "mps":
             torch.mps.empty_cache()
-        model.train()
+        for mdl in models:
+            mdl.train()
         return variants, t_eval, n
 
     # optional learning curve on the evaluation split, used only to measure how much
@@ -695,13 +848,17 @@ def run_one(bb, args, dataset, k, set_id, test_tok, meta, test_masks, text, bloc
     t1 = time.time()
     train(model, sup_tok, a_mask, labels, src, seg, args.epochs if args.adapter != "none" else 0, args.lr, args.batch,
           w_text=args.w_text_loss, w_mem=args.w_mem_loss, on_epoch=on_epoch if args.eval_every else None)
+    for m, mdl in enumerate(models[1:], 1):  # extra members; member 0 is trained exactly as without an ensemble
+        seed_all(set_id * 100 + k + 1000 * m)
+        train(mdl, sup_tok, a_mask, labels, src, seg, args.epochs if args.adapter != "none" else 0, args.lr, args.batch,
+              w_text=args.w_text_loss, w_mem=args.w_mem_loss)
     t_train = time.time() - t1
     variants, t_eval, n = evaluate()
-    model.eval()
     if args.eval_every:
         curve[args.epochs] = variants
 
     res = {"dataset": dataset, "k": k, "set": set_id, "backbone": args.backbone, "config": config_name(args),
+           "vd_n_pos": vd_counts[0], "vd_n_neg": vd_counts[1],
            "eval_split": "valid-minus-support" if args.dev else "test", "n_eval": n,
            "trainable_params": n_params, "sec_support_features": round(t_feat, 1), "sec_train": round(t_train, 1),
            "ms_per_test_image_heads": round(1000 * t_eval / n, 2), "support_in_test": overlap}
@@ -721,7 +878,7 @@ def run_one(bb, args, dataset, k, set_id, test_tok, meta, test_masks, text, bloc
     bad = [m for m in ("image_auc", "pixel_auc") if m in res and not np.isfinite(res[m])]
     if bad:
         raise GPUFault(f"invalid scores for {dataset} k={k} set={set_id}: {bad}; run not recorded")
-    del model, sup_tok
+    del model, models, sup_tok
     if DEV.type == "mps":
         torch.mps.empty_cache()
     log.write(json.dumps(res) + "\n")
@@ -828,6 +985,11 @@ def main():
                    help="add the frozen-feature memory distance to the adapted-feature distance")
     r.add_argument("--det_pool", choices=["mean", "max"], default="mean",
                    help="pooling of patch memory distances into an image score (classification datasets)")
+    r.add_argument("--extra_scores", action="store_true",
+                   help="also record memory-only scores with 3x3 neighbourhood averaging and frozen (dual) memory")
+    r.add_argument("--xs_lite", action="store_true",
+                   help="with --extra_scores, record only the two-sided lesion memory (faster, less memory)")
+    r.add_argument("--ensemble", type=int, default=1, help="number of adapter sets trained with different seeds")
     r.add_argument("--eval_batch", type=int, default=32)
     r.add_argument("--out", default=str(ROOT.parent / "results_fsad"))
     r.add_argument("--eval_every", type=int, default=0,
